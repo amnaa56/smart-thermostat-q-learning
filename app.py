@@ -1,5 +1,21 @@
+
 import random
 import numpy as np
+import streamlit as st
+import matplotlib.pyplot as plt
+
+st.set_page_config(
+    page_title="Smart Thermostat with Q-Learning",
+    page_icon="🌡️",
+    layout="wide"
+)
+
+st.title("🌡️ Smart Room Thermostat with Q-Learning")
+st.write(
+    "Train a reinforcement learning agent to balance room comfort "
+    "and electricity use, then compare it with a normal thermostat."
+)
+
 
 class Room:
     def __init__(self):
@@ -11,50 +27,253 @@ class Room:
         return self.state()
 
     def state(self):
-        return (self.temp - 20, self.occupied)      # temp range 20..34
+        # Temperature index: 0 = 20°C, 14 = 34°C
+        return (self.temp - 20, self.occupied)
 
     def step(self, action):
-        # random person comes or leaves
+        # A person may enter or leave the room.
         if random.random() < 0.1:
             self.occupied = 1 - self.occupied
 
-        # temperature change
-        if action == 1:                              # AC on
+        # Simplified room temperature model.
+        if action == 1:
             self.temp -= 1
-        elif random.random() < 0.5:                  # AC off, room heats up
+        elif random.random() < 0.5:
             self.temp += 1
+
         self.temp = max(20, min(34, self.temp))
 
         energy = 1.0 if action == 1 else 0.0
-        discomfort = abs(self.temp - 24) if self.occupied else 0
+        discomfort = abs(self.temp - 24) if self.occupied else 0.0
         reward = -(energy + 0.5 * discomfort)
-        return self.state(), reward
 
-def train(episodes=500, steps=200):
-    Q = np.zeros((15, 2, 2))
-    lr, gamma, eps = 0.1, 0.9, 1.0
+        return self.state(), reward, energy
+
+
+def train_agent(episodes=500, steps_per_episode=200):
+    q_table = np.zeros((15, 2, 2))
+
+    learning_rate = 0.1
+    discount_factor = 0.9
+    epsilon = 1.0
+
     env = Room()
+    training_rewards = []
+
     for _ in range(episodes):
-        s = env.reset()
-        for _ in range(steps):
-            a = random.randint(0, 1) if random.random() < eps else int(np.argmax(Q[s]))
-            s2, r = env.step(a)
-            Q[s][a] += lr * (r + gamma * np.max(Q[s2]) - Q[s][a])
-            s = s2
-        eps = max(0.05, eps * 0.99)
-    return Q
+        state = env.reset()
+        episode_reward = 0
 
-def evaluate(policy, steps=2000):
+        for _ in range(steps_per_episode):
+            if random.random() < epsilon:
+                action = random.randint(0, 1)
+            else:
+                action = int(
+                    np.argmax(q_table[state[0], state[1], :])
+                )
+
+            next_state, reward, _ = env.step(action)
+
+            current_q = q_table[state[0], state[1], action]
+            best_next_q = np.max(
+                q_table[next_state[0], next_state[1], :]
+            )
+
+            q_table[state[0], state[1], action] = current_q + learning_rate * (
+                reward + discount_factor * best_next_q - current_q
+            )
+
+            state = next_state
+            episode_reward += reward
+
+        training_rewards.append(episode_reward / steps_per_episode)
+        epsilon = max(0.05, epsilon * 0.99)
+
+    return q_table, training_rewards
+
+
+def rl_policy_factory(q_table):
+    def policy(state, env):
+        return int(np.argmax(q_table[state[0], state[1], :]))
+    return policy
+
+
+def normal_policy(state, env):
+    # Baseline: turn AC on whenever temperature exceeds 24°C.
+    return 1 if env.temp > 24 else 0
+
+
+def evaluate_policy(policy, steps=2000):
     env = Room()
-    s, total = env.reset(), 0
+    state = env.reset()
+
+    total_reward = 0.0
+    total_energy = 0.0
+    total_discomfort = 0.0
+    ac_on_steps = 0
+
     for _ in range(steps):
-        s, r = env.step(policy(s))
-        total += r
-    return total / steps
+        action = policy(state, env)
+        next_state, reward, energy = env.step(action)
 
-Q = train()
-rl_policy = lambda s: int(np.argmax(Q[s]))
-normal_policy = lambda s: 1 if s[0] + 20 > 24 else 0   # cool whenever temp > 24
+        total_reward += reward
+        total_energy += energy
 
-print("Avg reward RL    :", evaluate(rl_policy))
-print("Avg reward Normal:", evaluate(normal_policy))
+        if env.occupied:
+            total_discomfort += abs(env.temp - 24)
+
+        ac_on_steps += int(action == 1)
+        state = next_state
+
+    return {
+        "avg_reward": total_reward / steps,
+        "energy": total_energy,
+        "avg_discomfort": total_discomfort / steps,
+        "ac_on_percent": 100 * ac_on_steps / steps
+    }
+
+
+with st.sidebar:
+    st.header("Training Settings")
+
+    episodes = st.slider(
+        "Training episodes",
+        min_value=100,
+        max_value=2000,
+        value=500,
+        step=100
+    )
+
+    evaluation_steps = st.slider(
+        "Evaluation steps",
+        min_value=500,
+        max_value=5000,
+        value=2000,
+        step=500
+    )
+
+    st.caption("More episodes mean more training time.")
+
+
+if st.button("🚀 Train Agent and Compare", type="primary"):
+    with st.spinner("Training and evaluating both thermostats..."):
+        q_table, training_rewards = train_agent(episodes=episodes)
+
+        rl_results = evaluate_policy(
+            rl_policy_factory(q_table),
+            steps=evaluation_steps
+        )
+
+        normal_results = evaluate_policy(
+            normal_policy,
+            steps=evaluation_steps
+        )
+
+    st.session_state["training_rewards"] = training_rewards
+    st.session_state["rl_results"] = rl_results
+    st.session_state["normal_results"] = normal_results
+
+if "rl_results" in st.session_state:
+    rl = st.session_state["rl_results"]
+    normal = st.session_state["normal_results"]
+
+    st.subheader("Evaluation Results")
+    st.caption(
+        "Higher average reward (closer to zero) is better. "
+        "Energy values are simulation units, not real kWh."
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### Q-Learning Thermostat")
+        st.metric("Average reward", f'{rl["avg_reward"]:.3f}')
+        st.metric("Total energy units", f'{rl["energy"]:.0f}')
+        st.metric("Average discomfort", f'{rl["avg_discomfort"]:.3f}')
+        st.metric("AC on", f'{rl["ac_on_percent"]:.1f}% of steps')
+
+    with col2:
+        st.markdown("### Normal Thermostat")
+        st.metric("Average reward", f'{normal["avg_reward"]:.3f}')
+        st.metric("Total energy units", f'{normal["energy"]:.0f}')
+        st.metric("Average discomfort", f'{normal["avg_discomfort"]:.3f}')
+        st.metric("AC on", f'{normal["ac_on_percent"]:.1f}% of steps')
+
+    st.subheader("Controller Comparison")
+
+    chart_data = {
+        "Controller": ["Q-Learning", "Normal"],
+        "Average reward": [
+            rl["avg_reward"], normal["avg_reward"]
+        ],
+        "Total energy units": [
+            rl["energy"], normal["energy"]
+        ],
+        "Average discomfort": [
+            rl["avg_discomfort"], normal["avg_discomfort"]
+        ]
+    }
+
+    st.dataframe(
+        chart_data,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+    axes[0].bar(
+        chart_data["Controller"],
+        chart_data["Average reward"]
+    )
+    axes[0].set_title("Average Reward (higher is better)")
+    axes[0].set_ylabel("Reward per step")
+
+    axes[1].bar(
+        chart_data["Controller"],
+        chart_data["Total energy units"]
+    )
+    axes[1].set_title("Total Energy Use (lower is better)")
+    axes[1].set_ylabel("Simulation energy units")
+
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+
+    st.subheader("Learning Curve")
+
+    curve_fig, curve_ax = plt.subplots(figsize=(10, 3.5))
+    curve_ax.plot(
+        range(
+            1,
+            len(st.session_state["training_rewards"]) + 1
+        ),
+        st.session_state["training_rewards"]
+    )
+    curve_ax.set_xlabel("Episode")
+    curve_ax.set_ylabel("Average reward")
+    curve_ax.set_title("Q-Learning Training Progress")
+
+    curve_fig.tight_layout()
+    st.pyplot(curve_fig)
+    plt.close(curve_fig)
+
+    st.info(
+        "This is an educational simulation. Results can vary, and "
+        "Q-Learning is not guaranteed to outperform the baseline. "
+        "Real buildings need realistic temperature models and safety controls."
+    )
+
+else:
+    st.info(
+        "Choose your settings in the sidebar, then click "
+        "'Train Agent and Compare'."
+    )
+
+    st.subheader("How It Works")
+    st.markdown(
+        "1. The simulation tracks room temperature and occupancy.\n"
+        "2. The agent chooses whether to turn the AC on or off.\n"
+        "3. The reward penalizes energy use and occupied-room discomfort.\n"
+        "4. The trained agent is compared with a fixed-rule thermostat."
+    )
